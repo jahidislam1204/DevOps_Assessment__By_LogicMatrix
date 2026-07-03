@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>NoteApp | Professional Notes</title>
+
+    <link
+        rel="icon"
+        type="image/svg+xml"
+        href="assets/logo.svg">
+
+    <!-- Google Font -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+
+    <!-- Font Awesome -->
+    <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.6.0/css/all.min.css">
+
+    <!-- CSS -->
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div class="app">
+
+        <!-- ================= Sidebar ================= -->
+
+        <aside class="sidebar">
+
+            <div class="logo">
+
+                <i class="fa-solid fa-note-sticky"></i>
+
+                <span>NoteApp</span>
+
+            </div>
+
+            <nav>
+
+                <ul>
+
+                    <li class="active">
+                        <i class="fa-solid fa-book"></i>
+                        <span>All Notes</span>
+                    </li>
+
+                    <li id="trashBtn">
+                        <i class="fa-solid fa-trash"></i>
+                        <span>Trash</span>
+                    </li>
+
+                    <li id="aboutBtn">
+                        <i class="fa-solid fa-circle-info"></i>
+                        <span>About</span>
+                    </li>
+
+                </ul>
+
+            </nav>
+
+            <div class="theme-box" id="themeBtn">
+
+                <i class="fa-solid fa-sun"></i>
+
+                <span>Light Theme</span>
+
+            </div>
+
+            <div class="sidebar-footer">
+
+                © 2026 NoteApp
+
+                <br>
+
+                All Rights Reserved
+
+            </div>
+
+        </aside>
+
+        <!-- ================= Main ================= -->
+
+        <main class="main">
+
+            <!-- Header -->
+
+            <header class="header">
+
+                <div>
+
+                    <h1>
+
+                        Welcome Back 👋
+
+                    </h1>
+
+                    <p>
+
+                        Capture your ideas and keep them organized.
+
+                    </p>
+
+                </div>
+
+                <button class="new-btn">
+
+                    <i class="fa-solid fa-plus"></i>
+
+                    New Note
+
+                </button>
+
+            </header>
+
+            <!-- Note Editor -->
+
+            <section class="editor-card">
+
+                <textarea
+                    id="noteInput"
+                    maxlength="500"
+                    placeholder="Write your thoughts here..."></textarea>
+
+                <div class="editor-footer">
+
+                    <span id="charCount">
+
+                        0 / 500
+
+                    </span>
+
+                    <button id="saveBtn">
+
+                        <i class="fa-solid fa-floppy-disk"></i>
+
+                        Save Note
+
+                    </button>
+
+                </div>
+
+            </section>
+
+            <!-- Search -->
+
+            <section class="toolbar">
+
+                <div class="search-box">
+
+                    <i class="fa-solid fa-magnifying-glass"></i>
+
+                    <input
+                        type="text"
+                        id="searchInput"
+                        placeholder="Search your notes...">
+
+                </div>
+
+                <select id="sortSelect">
+
+                    <option>Newest First</option>
+
+                    <option>Oldest First</option>
+
+                </select>
+
+            </section>
+
+            <!-- Notes -->
+
+            <section id="notesContainer" class="notes-grid">
+
+                <!-- Notes will be inserted here -->
+
+            </section>
+
+            <!-- Empty State -->
+
+            <div id="emptyState" class="empty-state">
+
+                <i class="fa-regular fa-note-sticky"></i>
+
+                <h2>No Notes Yet</h2>
+
+                <p>
+
+                    Start writing your first note.
+
+                </p>
+
+            </div>
+
+        </main>
+
+    </div>
+
+    <!-- Toast -->
+
+    <div id="toast" class="toast">
+
+        Note Saved Successfully
+
+    </div>
+
+    <script src="script.js"></script>
+
+</body>
+
+</html>

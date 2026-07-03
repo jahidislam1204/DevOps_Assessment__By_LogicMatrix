@@ -1,0 +1,52 @@
+services:
+
+  backend:
+
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+    container_name: note-backend
+
+    ports:
+      - "8080:8080"
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    networks:
+      - note-network
+
+
+
+  frontend:
+
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+
+    container_name: note-frontend
+
+    ports:
+      - "3001:3000"
+
+    restart: unless-stopped
+
+    depends_on:
+      backend:
+        condition: service_healthy
+
+    networks:
+      - note-network
+
+
+networks:
+
+  note-network:
+    driver: bridge

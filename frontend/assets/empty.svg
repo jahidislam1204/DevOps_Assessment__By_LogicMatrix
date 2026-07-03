@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="400"
+     height="300"
+     viewBox="0 0 400 300">
+
+<defs>
+
+<linearGradient id="bg"
+x1="0%"
+y1="0%"
+x2="100%"
+y2="100%">
+
+<stop offset="0%" stop-color="#6366F1"/>
+
+<stop offset="100%" stop-color="#8B5CF6"/>
+
+</linearGradient>
+
+</defs>
+
+<circle
+cx="200"
+cy="140"
+r="85"
+fill="#EEF2FF"/>
+
+<rect
+x="120"
+y="70"
+width="160"
+height="180"
+rx="18"
+fill="url(#bg)"
+opacity="0.95"/>
+
+<rect
+x="145"
+y="105"
+width="110"
+height="12"
+rx="6"
+fill="white"/>
+
+<rect
+x="145"
+y="130"
+width="90"
+height="12"
+rx="6"
+fill="white"/>
+
+<rect
+x="145"
+y="155"
+width="100"
+height="12"
+rx="6"
+fill="white"/>
+
+<rect
+x="145"
+y="180"
+width="70"
+height="12"
+rx="6"
+fill="white"/>
+
+<text
+x="200"
+y="280"
+text-anchor="middle"
+font-size="18"
+fill="#64748B"
+font-family="Poppins">
+
+No Notes Yet
+
+</text>
+
+</svg>
