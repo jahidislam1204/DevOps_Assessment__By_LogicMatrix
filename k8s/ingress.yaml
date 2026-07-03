@@ -1,0 +1,37 @@
+# Public ALB ingress managed by AWS Load Balancer Controller.
+# Only the frontend is exposed publicly; the backend remains private.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: note-app
+  namespace: note-app
+  labels:
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: ingress
+    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/managed-by: kubectl
+  annotations:
+    # Use the AWS Load Balancer Controller rather than NGINX.
+    kubernetes.io/ingress.class: alb
+    # Create an internet-facing ALB for public access.
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    # Route traffic directly to pod IPs for EKS workloads.
+    alb.ingress.kubernetes.io/target-type: ip
+    # Listen on HTTP. Add HTTPS and ACM integration later if needed.
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    # Health checks should validate frontend reachability.
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/success-codes: "200-399"
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          # All public traffic is forwarded to the frontend service.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80

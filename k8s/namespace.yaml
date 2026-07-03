@@ -1,4 +1,12 @@
+# Creates a dedicated namespace so the note application is isolated from
+# other workloads running in the EKS cluster.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: notes-app
+  name: note-app
+  labels:
+    # Recommended labels improve discoverability and operational consistency.
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: platform
+    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/managed-by: kubectl

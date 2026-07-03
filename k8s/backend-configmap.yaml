@@ -1,0 +1,25 @@
+# Stores non-sensitive backend runtime configuration.
+# Sensitive values such as credentials belong in a Secret instead.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: note-app
+  labels:
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/managed-by: kubectl
+data:
+  # Application runtime mode used by Flask and supporting libraries.
+  APP_ENV: "production"
+  # Log verbosity should stay predictable in production for easier alerting.
+  LOG_LEVEL: "INFO"
+  # Private RDS endpoint provisioned by Terraform.
+  DB_HOST: "note-app-mysql.xxxxx.ap-southeast-2.rds.amazonaws.com"
+  # MySQL default port.
+  DB_PORT: "3306"
+  # Logical database name used by the application.
+  DB_NAME: "noteapp"
+  # Version prefix for API routes and compatibility checks.
+  API_VERSION: "v1"

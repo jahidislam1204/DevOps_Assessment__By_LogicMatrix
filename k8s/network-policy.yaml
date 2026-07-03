@@ -1,0 +1,152 @@
+# NetworkPolicy set for a default-deny model with only the required flows allowed:
+# 1. AWS Load Balancer Controller managed traffic to the frontend
+# 2. Frontend to backend API calls
+# 3. Backend to the private RDS MySQL endpoint
+#
+# Note: standard Kubernetes NetworkPolicy cannot match an AWS ALB directly because
+# the ALB lives outside the cluster. In practice, ingress traffic reaches pods
+# through worker nodes and VPC networking. This policy therefore allows frontend
+# ingress on the application port, and stricter enforcement should be paired with
+# VPC security groups for pods or CNI-specific policies if you need source-level
+# restriction at the AWS networking layer.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: note-app
+  labels:
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: security
+    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Allow ingress traffic to frontend pods on the application port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-allow-ingress
+  namespace: note-app
+  labels:
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: note-app
+      app.kubernetes.io/component: frontend
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 3000
+---
+# Allow frontend pods to call the backend API and resolve DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-egress
+  namespace: note-app
+  labels:
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: note-app
+      app.kubernetes.io/component: frontend
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: note-app
+              app.kubernetes.io/component: backend
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        # DNS egress is required for normal service discovery.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# Allow only frontend pods to call the backend API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-allow-from-frontend
+  namespace: note-app
+  labels:
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: note-app
+      app.kubernetes.io/component: backend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: note-app
+              app.kubernetes.io/component: frontend
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# Allow backend pods to talk only to MySQL and DNS.
+# Replace the cidr below with the RDS subnet range or another precise network
+# segment aligned with your Terraform-managed VPC design.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-egress
+  namespace: note-app
+  labels:
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: note-app
+      app.kubernetes.io/component: backend
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/16
+      ports:
+        - protocol: TCP
+          port: 3306
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

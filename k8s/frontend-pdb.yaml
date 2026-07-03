@@ -1,0 +1,17 @@
+# PodDisruptionBudget protects the frontend during voluntary disruptions.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend
+  namespace: note-app
+  labels:
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: note-app
+      app.kubernetes.io/component: frontend

@@ -1,35 +1,86 @@
+# Frontend deployment serving static assets.
+# It remains internal to the cluster and is exposed externally only via ALB ingress.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: frontend-deployment
-  namespace: notes-app
+  name: frontend
+  namespace: note-app
   labels:
-    app: frontend
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/managed-by: kubectl
 spec:
   replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
-      app: frontend
+      app.kubernetes.io/name: note-app
+      app.kubernetes.io/component: frontend
   template:
     metadata:
       labels:
-        app: frontend
+        app.kubernetes.io/name: note-app
+        app.kubernetes.io/component: frontend
+        app.kubernetes.io/version: "<IMAGE_TAG>"
+        app.kubernetes.io/managed-by: kubectl
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: frontend
-          image: frontend-placeholder:sha
-          imagePullPolicy: Always
+          image: 009907128734.dkr.ecr.ap-southeast-2.amazonaws.com/note-frontend:<IMAGE_TAG>
+          imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 3000
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
           readinessProbe:
             httpGet:
               path: /
-              port: 3000
+              port: http
             initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /
-              port: 3000
+              port: http
             initialDelaySeconds: 20
             periodSeconds: 20
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      terminationGracePeriodSeconds: 30

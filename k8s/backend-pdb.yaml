@@ -1,0 +1,18 @@
+# PodDisruptionBudget protects backend availability during voluntary disruptions
+# such as node drains or managed node group maintenance.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: backend
+  namespace: note-app
+  labels:
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: note-app
+      app.kubernetes.io/component: backend

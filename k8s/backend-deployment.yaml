@@ -1,35 +1,105 @@
+# Backend deployment for the Flask API.
+# Uses rolling updates, strong security defaults, and explicit probes.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: backend-deployment
-  namespace: notes-app
+  name: backend
+  namespace: note-app
   labels:
-    app: backend
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/managed-by: kubectl
 spec:
   replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Add at most one extra pod during an update.
+      maxSurge: 1
+      # Keep all existing pods available during rollout.
+      maxUnavailable: 0
   selector:
     matchLabels:
-      app: backend
+      app.kubernetes.io/name: note-app
+      app.kubernetes.io/component: backend
   template:
     metadata:
       labels:
-        app: backend
+        app.kubernetes.io/name: note-app
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/version: "<IMAGE_TAG>"
+        app.kubernetes.io/managed-by: kubectl
     spec:
+      # Dedicated ServiceAccount keeps the deployment ready for future IRSA use.
+      serviceAccountName: note-app-workload
+      automountServiceAccountToken: false
+      securityContext:
+        # Pod-level defaults help keep all containers non-root by design.
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: backend
-          image: backend-placeholder:sha
-          imagePullPolicy: Always
+          image: 009907128734.dkr.ecr.ap-southeast-2.amazonaws.com/note-backend:<IMAGE_TAG>
+          # Never use latest in production so rollbacks remain deterministic.
+          imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            # Non-sensitive configuration comes from ConfigMap.
+            - configMapRef:
+                name: backend-config
+            # Secrets remain separate so they can later be externalized.
+            - secretRef:
+                name: backend-secret
+          resources:
+            # Requests reserve capacity; limits protect node stability.
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
           readinessProbe:
+            # Readiness keeps traffic away until the app is ready to serve.
             httpGet:
               path: /health
-              port: 8080
+              port: http
             initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
           livenessProbe:
+            # Liveness restarts the pod if the process becomes unhealthy.
             httpGet:
               path: /health
-              port: 8080
+              port: http
             initialDelaySeconds: 20
             periodSeconds: 20
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+          securityContext:
+            # Container-level hardening follows least-privilege principles.
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            # Writable temporary storage is mounted explicitly because the root
+            # filesystem is read-only.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      terminationGracePeriodSeconds: 30

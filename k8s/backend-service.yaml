@@ -1,12 +1,22 @@
+# Internal ClusterIP service for the backend API.
+# This service is intentionally not exposed through public ingress.
 apiVersion: v1
 kind: Service
 metadata:
-  name: backend-service
-  namespace: notes-app
+  name: backend
+  namespace: note-app
+  labels:
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/managed-by: kubectl
 spec:
+  type: ClusterIP
   selector:
-    app: backend
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: backend
   ports:
     - name: http
       port: 8080
-      targetPort: 8080
+      targetPort: http
+      protocol: TCP

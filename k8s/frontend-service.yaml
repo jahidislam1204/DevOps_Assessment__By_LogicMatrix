@@ -1,12 +1,22 @@
+# Internal service for the static frontend.
+# External access is handled by the AWS Load Balancer Controller ingress.
 apiVersion: v1
 kind: Service
 metadata:
-  name: frontend-service
-  namespace: notes-app
+  name: frontend
+  namespace: note-app
+  labels:
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/managed-by: kubectl
 spec:
+  type: ClusterIP
   selector:
-    app: frontend
+    app.kubernetes.io/name: note-app
+    app.kubernetes.io/component: frontend
   ports:
     - name: http
       port: 80
-      targetPort: 3000
+      targetPort: http
+      protocol: TCP
