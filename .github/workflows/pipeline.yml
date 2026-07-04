@@ -180,7 +180,7 @@ jobs:
     needs:
       - validate_terraform_formatting
     env:
-      TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/terraform-plugin-cache
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
