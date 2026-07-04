@@ -64,17 +64,11 @@ jobs:
           set -euo pipefail
           BACKEND_IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.BACKEND_ECR_REPOSITORY }}:${GITHUB_SHA}"
           FRONTEND_IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.FRONTEND_ECR_REPOSITORY }}:${GITHUB_SHA}"
-          BACKEND_LATEST_IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.BACKEND_ECR_REPOSITORY }}:latest"
-          FRONTEND_LATEST_IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.FRONTEND_ECR_REPOSITORY }}:latest"
 
           echo "BACKEND_IMAGE_URI=${BACKEND_IMAGE_URI}" >> "${GITHUB_ENV}"
           echo "FRONTEND_IMAGE_URI=${FRONTEND_IMAGE_URI}" >> "${GITHUB_ENV}"
-          echo "BACKEND_LATEST_IMAGE_URI=${BACKEND_LATEST_IMAGE_URI}" >> "${GITHUB_ENV}"
-          echo "FRONTEND_LATEST_IMAGE_URI=${FRONTEND_LATEST_IMAGE_URI}" >> "${GITHUB_ENV}"
           echo "backend_image_uri=${BACKEND_IMAGE_URI}" >> "${GITHUB_OUTPUT}"
           echo "frontend_image_uri=${FRONTEND_IMAGE_URI}" >> "${GITHUB_OUTPUT}"
-          echo "backend_latest_image_uri=${BACKEND_LATEST_IMAGE_URI}" >> "${GITHUB_OUTPUT}"
-          echo "frontend_latest_image_uri=${FRONTEND_LATEST_IMAGE_URI}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -85,9 +79,7 @@ jobs:
           context: ${{ env.BACKEND_CONTEXT }}
           file: ${{ env.BACKEND_CONTEXT }}/Dockerfile
           push: true
-          tags: |
-            ${{ steps.image-uri.outputs.backend_image_uri }}
-            ${{ steps.image-uri.outputs.backend_latest_image_uri }}
+          tags: ${{ steps.image-uri.outputs.backend_image_uri }}
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
 
@@ -97,9 +89,7 @@ jobs:
           context: ${{ env.FRONTEND_CONTEXT }}
           file: ${{ env.FRONTEND_CONTEXT }}/Dockerfile
           push: true
-          tags: |
-            ${{ steps.image-uri.outputs.frontend_image_uri }}
-            ${{ steps.image-uri.outputs.frontend_latest_image_uri }}
+          tags: ${{ steps.image-uri.outputs.frontend_image_uri }}
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
 
