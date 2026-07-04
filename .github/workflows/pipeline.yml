@@ -1,7 +1,5 @@
 name: Enterprise CI/CD
 
-# Single production delivery workflow for validation, testing, image publishing,
-# release creation, Kubernetes deployment, and post-deployment verification.
 on:
   push:
     branches:
@@ -11,15 +9,12 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # Only one production deployment for the same ref can run at a time.
   group: enterprise-cicd-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
   contents: read
   id-token: write
-  packages: read
-  actions: read
   security-events: write
 
 env:
@@ -49,63 +44,23 @@ env:
   AWS_ACCESS_KEY_ID_VALUE: ${{ secrets.AWS_ACCESS_KEY_ID }}
 
 jobs:
-  checkout_repository:
-    name: 01 - Checkout Repository
+  test:
+    name: Test
     runs-on: ubuntu-latest
-    outputs:
-      short_sha: ${{ steps.repository_metadata.outputs.short_sha }}
-      semantic_tag: ${{ steps.repository_metadata.outputs.semantic_tag }}
-      release_channel: ${{ steps.repository_metadata.outputs.release_channel }}
-      backend_image_uri: ${{ steps.repository_metadata.outputs.backend_image_uri }}
-      frontend_image_uri: ${{ steps.repository_metadata.outputs.frontend_image_uri }}
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Derive repository metadata
-        id: repository_metadata
+      - name: Validate repository structure
         shell: bash
         run: |
           set -euo pipefail
-
-          short_sha="$(git rev-parse --short=12 HEAD)"
-          semantic_tag=""
-          release_channel="branch"
-
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            semantic_tag="${GITHUB_REF_NAME}"
-            release_channel="tag"
-          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
-            release_channel="main"
-          fi
-
-          backend_image_uri="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${BACKEND_ECR_REPOSITORY}"
-          frontend_image_uri="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${FRONTEND_ECR_REPOSITORY}"
-
-          echo "short_sha=${short_sha}" >> "${GITHUB_OUTPUT}"
-          echo "semantic_tag=${semantic_tag}" >> "${GITHUB_OUTPUT}"
-          echo "release_channel=${release_channel}" >> "${GITHUB_OUTPUT}"
-          echo "backend_image_uri=${backend_image_uri}" >> "${GITHUB_OUTPUT}"
-          echo "frontend_image_uri=${frontend_image_uri}" >> "${GITHUB_OUTPUT}"
-
-  validate_repository_structure:
-    name: 02 - Validate Repository Structure
-    runs-on: ubuntu-latest
-    needs:
-      - checkout_repository
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Validate required enterprise delivery paths
-        shell: bash
-        run: |
-          set -euo pipefail
-
           required_paths=(
-            ".github/workflows"
+            ".github/workflows/pipeline.yml"
             "${BACKEND_CONTEXT}/Dockerfile"
             "${BACKEND_CONTEXT}/requirements.txt"
             "${BACKEND_CONTEXT}/tests"
@@ -120,7 +75,6 @@ jobs:
             "${TERRAFORM_DIR}/provider.tf"
             "${TERRAFORM_DIR}/main.tf"
           )
-
           for path in "${required_paths[@]}"; do
             if [[ ! -e "${path}" ]]; then
               echo "::error title=Repository structure validation failed::Missing required path: ${path}"
@@ -128,35 +82,25 @@ jobs:
             fi
           done
 
-          echo "Repository structure validation passed."
-
-  validate_kubernetes_manifests:
-    name: 03 - Validate Kubernetes Manifests
-    runs-on: ubuntu-latest
-    needs:
-      - validate_repository_structure
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Python for offline manifest validation
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: ${{ env.BACKEND_CONTEXT }}/requirements.txt
 
-      - name: Install manifest validation dependencies
+      - name: Install validation and backend dependencies
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install PyYAML==6.0.2
+          python -m pip install -r "${BACKEND_CONTEXT}/requirements.txt"
 
       - name: Validate Kubernetes manifests offline
         shell: bash
         run: |
           set -euo pipefail
-
           python - <<'PY'
           from pathlib import Path
           import sys
@@ -179,11 +123,9 @@ jobs:
                   if not isinstance(document, dict):
                       failures.append(f"{path} document {index}: document must be a YAML mapping")
                       continue
-
                   api_version = document.get("apiVersion")
                   kind = document.get("kind")
                   metadata = document.get("metadata")
-
                   if not api_version:
                       failures.append(f"{path} document {index}: missing apiVersion")
                   if not kind:
@@ -193,9 +135,7 @@ jobs:
                       continue
                   if not metadata.get("name"):
                       failures.append(f"{path} document {index}: missing metadata.name")
-
-                  namespace = metadata.get("namespace", "cluster-scope")
-                  resources.append(f"{api_version}/{kind}/{namespace}/{metadata.get('name')}")
+                  resources.append(f"{api_version}/{kind}/{metadata.get('namespace', 'cluster-scope')}/{metadata.get('name')}")
 
           if failures:
               print("Kubernetes manifest validation failed:", file=sys.stderr)
@@ -208,37 +148,17 @@ jobs:
               print(f"  - {resource}")
           PY
 
-  validate_terraform_formatting:
-    name: 04 - Validate Terraform Formatting
-    runs-on: ubuntu-latest
-    needs:
-      - validate_kubernetes_manifests
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      - name: Validate Terraform formatting
+      - name: Validate Python syntax
         shell: bash
-        working-directory: ${{ env.TERRAFORM_DIR }}
         run: |
           set -euo pipefail
-          terraform fmt -check -recursive
-
-  validate_terraform:
-    name: 05 - Validate Terraform
-    runs-on: ubuntu-latest
-    needs:
-      - validate_terraform_formatting
-    env:
-      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          for path in Path("backend").rglob("*.py"):
+              ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          print("Python syntax validation passed.")
+          PY
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -253,105 +173,15 @@ jobs:
           restore-keys: |
             terraform-${{ runner.os }}-
 
-      - name: Initialize Terraform without backend
+      - name: Validate Terraform
         shell: bash
         working-directory: ${{ env.TERRAFORM_DIR }}
         run: |
           set -euo pipefail
           mkdir -p "${TF_PLUGIN_CACHE_DIR}"
+          terraform fmt -check -recursive
           terraform init -backend=false -input=false -no-color
-
-      - name: Validate Terraform configuration
-        shell: bash
-        working-directory: ${{ env.TERRAFORM_DIR }}
-        run: |
-          set -euo pipefail
           terraform validate -no-color
-
-  python_setup:
-    name: 06 - Python Setup
-    runs-on: ubuntu-latest
-    needs:
-      - validate_terraform
-    outputs:
-      python_version: ${{ env.PYTHON_VERSION }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: ${{ env.BACKEND_CONTEXT }}/requirements.txt
-
-      - name: Validate Python source syntax
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import ast
-          from pathlib import Path
-
-          for path in Path("backend").rglob("*.py"):
-              ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-
-          print("Python syntax validation passed.")
-          PY
-
-  install_backend_dependencies:
-    name: 07 - Install Backend Dependencies
-    runs-on: ubuntu-latest
-    needs:
-      - python_setup
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Python with pip cache
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ needs.python_setup.outputs.python_version }}
-          cache: pip
-          cache-dependency-path: ${{ env.BACKEND_CONTEXT }}/requirements.txt
-
-      - name: Install backend dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install -r "${BACKEND_CONTEXT}/requirements.txt"
-
-      - name: Upload dependency manifest artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-dependency-manifest
-          path: ${{ env.BACKEND_CONTEXT }}/requirements.txt
-          retention-days: 14
-
-  run_backend_unit_tests:
-    name: 08 - Run Backend Unit Tests
-    runs-on: ubuntu-latest
-    needs:
-      - install_backend_dependencies
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Python with pip cache
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: ${{ env.BACKEND_CONTEXT }}/requirements.txt
-
-      - name: Install backend test dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install -r "${BACKEND_CONTEXT}/requirements.txt"
 
       - name: Run backend unit tests
         shell: bash
@@ -360,163 +190,58 @@ jobs:
           set -euo pipefail
           python -m unittest discover -s tests -p "test_*.py" -v
 
-  build_backend_docker_image:
-    name: 09 - Build Backend Docker Image
+  build:
+    name: Build
     runs-on: ubuntu-latest
     needs:
-      - run_backend_unit_tests
+      - test
+    permissions:
+      contents: write
+      id-token: write
+      security-events: write
+    outputs:
+      short_sha: ${{ steps.image_tags.outputs.short_sha }}
+      backend_deploy_image: ${{ steps.image_tags.outputs.backend_deploy_image }}
+      frontend_deploy_image: ${{ steps.image_tags.outputs.frontend_deploy_image }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build backend Docker image with BuildKit cache
-        uses: docker/build-push-action@v6
         with:
-          context: ${{ env.BACKEND_CONTEXT }}
-          file: ${{ env.BACKEND_CONTEXT }}/Dockerfile
-          push: false
-          tags: |
-            ${{ env.BACKEND_IMAGE_URI }}:${{ env.IMAGE_TAG }}
-            backend:${{ env.IMAGE_TAG }}
-          labels: |
-            org.opencontainers.image.title=NoteApp Backend
-            org.opencontainers.image.description=Enterprise Flask API
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
-          outputs: type=docker,dest=${{ runner.temp }}/backend-image.tar
-          cache-from: type=gha,scope=backend-build
-          cache-to: type=gha,mode=max,scope=backend-build
+          fetch-depth: 0
 
-      - name: Upload backend image artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-image-${{ github.sha }}
-          path: ${{ runner.temp }}/backend-image.tar
-          retention-days: 3
-
-  build_frontend_docker_image:
-    name: 10 - Build Frontend Docker Image
-    runs-on: ubuntu-latest
-    needs:
-      - build_backend_docker_image
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build frontend Docker image with BuildKit cache
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ env.FRONTEND_CONTEXT }}
-          file: ${{ env.FRONTEND_CONTEXT }}/Dockerfile
-          push: false
-          tags: |
-            ${{ env.FRONTEND_IMAGE_URI }}:${{ env.IMAGE_TAG }}
-            frontend:${{ env.IMAGE_TAG }}
-          labels: |
-            org.opencontainers.image.title=NoteApp Frontend
-            org.opencontainers.image.description=Enterprise static frontend
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
-          outputs: type=docker,dest=${{ runner.temp }}/frontend-image.tar
-          cache-from: type=gha,scope=frontend-build
-          cache-to: type=gha,mode=max,scope=frontend-build
-
-      - name: Upload frontend image artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-image-${{ github.sha }}
-          path: ${{ runner.temp }}/frontend-image.tar
-          retention-days: 3
-
-  docker_security_scan:
-    name: 11 - Docker Security Scan
-    runs-on: ubuntu-latest
-    needs:
-      - build_frontend_docker_image
-    steps:
-      - name: Download backend image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: backend-image-${{ github.sha }}
-          path: ${{ runner.temp }}/images
-
-      - name: Download frontend image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-image-${{ github.sha }}
-          path: ${{ runner.temp }}/images
-
-      - name: Load Docker images for scanning
+      - name: Generate image tags
+        id: image_tags
         shell: bash
         run: |
           set -euo pipefail
-          docker load --input "${RUNNER_TEMP}/images/backend-image.tar"
-          docker load --input "${RUNNER_TEMP}/images/frontend-image.tar"
-          docker image ls
+          mkdir -p .pipeline
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          {
+            echo "${BACKEND_IMAGE_URI}:${IMAGE_TAG}"
+            [[ "${GITHUB_REF}" == refs/tags/v* ]] && echo "${BACKEND_IMAGE_URI}:${GITHUB_REF_NAME}"
+            [[ "${GITHUB_REF}" == "refs/heads/main" ]] && echo "${BACKEND_IMAGE_URI}:latest"
+          } > .pipeline/backend-tags.txt
+          {
+            echo "${FRONTEND_IMAGE_URI}:${IMAGE_TAG}"
+            [[ "${GITHUB_REF}" == refs/tags/v* ]] && echo "${FRONTEND_IMAGE_URI}:${GITHUB_REF_NAME}"
+            [[ "${GITHUB_REF}" == "refs/heads/main" ]] && echo "${FRONTEND_IMAGE_URI}:latest"
+          } > .pipeline/frontend-tags.txt
+          {
+            echo "backend_tags<<EOF"
+            cat .pipeline/backend-tags.txt
+            echo "EOF"
+            echo "frontend_tags<<EOF"
+            cat .pipeline/frontend-tags.txt
+            echo "EOF"
+            echo "short_sha=${short_sha}"
+            echo "backend_deploy_image=${BACKEND_IMAGE_URI}:${IMAGE_TAG}"
+            echo "frontend_deploy_image=${FRONTEND_IMAGE_URI}:${IMAGE_TAG}"
+          } >> "${GITHUB_OUTPUT}"
 
-      - name: Scan backend image with Trivy
-        uses: aquasecurity/trivy-action@0.30.0
-        with:
-          image-ref: backend:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: backend-trivy-results.sarif
-          severity: CRITICAL,HIGH
-          vuln-type: os,library
-          ignore-unfixed: true
-          exit-code: 1
-
-      - name: Upload backend Trivy SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: backend-trivy-results.sarif
-
-      - name: Scan frontend image with Trivy
-        uses: aquasecurity/trivy-action@0.30.0
-        with:
-          image-ref: frontend:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: frontend-trivy-results.sarif
-          severity: CRITICAL,HIGH
-          vuln-type: os,library
-          ignore-unfixed: true
-          exit-code: 1
-
-      - name: Upload frontend Trivy SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: frontend-trivy-results.sarif
-
-      - name: Upload Trivy scan artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-sarif-${{ github.sha }}
-          path: "*-trivy-results.sarif"
-          retention-days: 14
-
-  authenticate_to_aws:
-    name: 12 - Authenticate to AWS
-    runs-on: ubuntu-latest
-    needs:
-      - docker_security_scan
-    outputs:
-      aws_account_id: ${{ steps.identity.outputs.aws_account_id }}
-    steps:
       - name: Validate AWS authentication inputs
         shell: bash
         run: |
           set -euo pipefail
-
           if [[ -z "${AWS_ROLE_TO_ASSUME}" && -z "${AWS_ACCESS_KEY_ID_VALUE}" ]]; then
             echo "::error title=AWS authentication unavailable::Configure secrets.AWS_ROLE_TO_ASSUME for GitHub OIDC or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY for key-based fallback."
             exit 1
@@ -539,239 +264,97 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
 
-      - name: Verify AWS caller identity
-        id: identity
-        shell: bash
-        run: |
-          set -euo pipefail
-          account_id="$(aws sts get-caller-identity --query Account --output text)"
-          echo "::add-mask::${account_id}"
-          echo "aws_account_id=${account_id}" >> "${GITHUB_OUTPUT}"
-
-  login_to_amazon_ecr:
-    name: 13 - Login to Amazon ECR
-    runs-on: ubuntu-latest
-    needs:
-      - authenticate_to_aws
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
         with:
           mask-password: true
 
-  push_backend_image:
-    name: 14 - Push Backend Image
-    runs-on: ubuntu-latest
-    needs:
-      - login_to_amazon_ecr
-    outputs:
-      backend_sha_image: ${{ steps.push_backend.outputs.backend_sha_image }}
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Build backend Docker image
+        uses: docker/build-push-action@v6
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
+          context: ${{ env.BACKEND_CONTEXT }}
+          file: ${{ env.BACKEND_CONTEXT }}/Dockerfile
+          load: true
+          push: false
+          tags: ${{ steps.image_tags.outputs.backend_tags }}
+          labels: |
+            org.opencontainers.image.title=NoteApp Backend
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=backend-build
+          cache-to: type=gha,mode=max,scope=backend-build
 
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build frontend Docker image
+        uses: docker/build-push-action@v6
         with:
-          mask-password: true
+          context: ${{ env.FRONTEND_CONTEXT }}
+          file: ${{ env.FRONTEND_CONTEXT }}/Dockerfile
+          load: true
+          push: false
+          tags: ${{ steps.image_tags.outputs.frontend_tags }}
+          labels: |
+            org.opencontainers.image.title=NoteApp Frontend
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=frontend-build
+          cache-to: type=gha,mode=max,scope=frontend-build
 
-      - name: Download backend image artifact
-        uses: actions/download-artifact@v4
+      - name: Scan backend image with Trivy
+        uses: aquasecurity/trivy-action@0.30.0
         with:
-          name: backend-image-${{ github.sha }}
-          path: ${{ runner.temp }}/images
+          image-ref: ${{ env.BACKEND_IMAGE_URI }}:${{ env.IMAGE_TAG }}
+          format: sarif
+          output: backend-trivy-results.sarif
+          severity: CRITICAL,HIGH
+          vuln-type: os,library
+          ignore-unfixed: true
+          exit-code: 1
 
-      - name: Load and push backend image
-        id: push_backend
+      - name: Upload backend Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: backend-trivy-results.sarif
+
+      - name: Scan frontend image with Trivy
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref: ${{ env.FRONTEND_IMAGE_URI }}:${{ env.IMAGE_TAG }}
+          format: sarif
+          output: frontend-trivy-results.sarif
+          severity: CRITICAL,HIGH
+          vuln-type: os,library
+          ignore-unfixed: true
+          exit-code: 1
+
+      - name: Upload frontend Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: frontend-trivy-results.sarif
+
+      - name: Push images to Amazon ECR
         shell: bash
         run: |
           set -euo pipefail
-
-          backend_image="${BACKEND_IMAGE_URI}:${IMAGE_TAG}"
-          docker load --input "${RUNNER_TEMP}/images/backend-image.tar"
-          docker push "${backend_image}"
-
-          echo "backend_sha_image=${backend_image}" >> "${GITHUB_OUTPUT}"
-
-  push_frontend_image:
-    name: 15 - Push Frontend Image
-    runs-on: ubuntu-latest
-    needs:
-      - push_backend_image
-    outputs:
-      frontend_sha_image: ${{ steps.push_frontend.outputs.frontend_sha_image }}
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
-        with:
-          mask-password: true
-
-      - name: Download frontend image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-image-${{ github.sha }}
-          path: ${{ runner.temp }}/images
-
-      - name: Load and push frontend image
-        id: push_frontend
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          frontend_image="${FRONTEND_IMAGE_URI}:${IMAGE_TAG}"
-          docker load --input "${RUNNER_TEMP}/images/frontend-image.tar"
-          docker push "${frontend_image}"
-
-          echo "frontend_sha_image=${frontend_image}" >> "${GITHUB_OUTPUT}"
-
-  tag_images:
-    name: 16 - Tag Images
-    runs-on: ubuntu-latest
-    needs:
-      - push_frontend_image
-    outputs:
-      backend_deploy_image: ${{ steps.tag_images.outputs.backend_deploy_image }}
-      frontend_deploy_image: ${{ steps.tag_images.outputs.frontend_deploy_image }}
-      published_tags: ${{ steps.tag_images.outputs.published_tags }}
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
-        with:
-          mask-password: true
-
-      - name: Tag immutable SHA images with release tags
-        id: tag_images
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          backend_repo="${BACKEND_IMAGE_URI}"
-          frontend_repo="${FRONTEND_IMAGE_URI}"
-          backend_sha_image="${backend_repo}:${IMAGE_TAG}"
-          frontend_sha_image="${frontend_repo}:${IMAGE_TAG}"
-          published_tags="sha:${IMAGE_TAG}"
-
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            docker buildx imagetools create -t "${backend_repo}:${GITHUB_REF_NAME}" "${backend_sha_image}"
-            docker buildx imagetools create -t "${frontend_repo}:${GITHUB_REF_NAME}" "${frontend_sha_image}"
-            published_tags="${published_tags},semver:${GITHUB_REF_NAME}"
-          fi
-
-          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
-            docker buildx imagetools create -t "${backend_repo}:latest" "${backend_sha_image}"
-            docker buildx imagetools create -t "${frontend_repo}:latest" "${frontend_sha_image}"
-            published_tags="${published_tags},latest"
-          fi
-
-          echo "backend_deploy_image=${backend_sha_image}" >> "${GITHUB_OUTPUT}"
-          echo "frontend_deploy_image=${frontend_sha_image}" >> "${GITHUB_OUTPUT}"
-          echo "published_tags=${published_tags}" >> "${GITHUB_OUTPUT}"
-
-  generate_build_metadata:
-    name: 17 - Generate Build Metadata
-    runs-on: ubuntu-latest
-    needs:
-      - tag_images
-    outputs:
-      metadata_artifact_name: ${{ steps.metadata.outputs.metadata_artifact_name }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+          while IFS= read -r image; do [[ -n "${image}" ]] && docker push "${image}"; done < .pipeline/backend-tags.txt
+          while IFS= read -r image; do [[ -n "${image}" ]] && docker push "${image}"; done < .pipeline/frontend-tags.txt
 
       - name: Generate build metadata
-        id: metadata
         shell: bash
         run: |
           set -euo pipefail
-
-          short_sha="$(git rev-parse --short=12 HEAD)"
-          release_channel="branch"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            release_channel="tag"
-          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
-            release_channel="main"
-          fi
-
-          artifact_name="build-metadata-${short_sha}"
           mkdir -p build-metadata
-
           cat > build-metadata/deployment-summary.json <<JSON
           {
             "repository": "${GITHUB_REPOSITORY}",
             "workflow": "${GITHUB_WORKFLOW}",
             "run_id": "${GITHUB_RUN_ID}",
-            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
             "commit_sha": "${GITHUB_SHA}",
-            "short_sha": "${short_sha}",
-            "git_ref": "${GITHUB_REF}",
-            "git_ref_name": "${GITHUB_REF_NAME}",
-            "release_channel": "${release_channel}",
-            "published_tags": "${{ needs.tag_images.outputs.published_tags }}",
+            "short_sha": "${{ steps.image_tags.outputs.short_sha }}",
             "backend_image": "${BACKEND_IMAGE_URI}:${IMAGE_TAG}",
             "frontend_image": "${FRONTEND_IMAGE_URI}:${IMAGE_TAG}",
             "aws_region": "${AWS_REGION}",
@@ -780,31 +363,14 @@ jobs:
           }
           JSON
 
-          echo "metadata_artifact_name=${artifact_name}" >> "${GITHUB_OUTPUT}"
-
-      - name: Upload build metadata artifact
+      - name: Upload build metadata
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.metadata.outputs.metadata_artifact_name }}
+          name: build-metadata-${{ steps.image_tags.outputs.short_sha }}
           path: build-metadata/
           retention-days: 30
 
-  create_github_release:
-    name: 18 - Create GitHub Release
-    runs-on: ubuntu-latest
-    needs:
-      - generate_build_metadata
-    permissions:
-      contents: write
-    steps:
-      - name: Download build metadata artifact
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.generate_build_metadata.outputs.metadata_artifact_name }}
-          path: build-metadata
-
-      - name: Create release when semantic Git tag is pushed
+      - name: Create GitHub Release for semantic tag
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
@@ -815,73 +381,17 @@ jobs:
 
             Backend image: `${{ env.BACKEND_IMAGE_URI }}:${{ env.IMAGE_TAG }}`
             Frontend image: `${{ env.FRONTEND_IMAGE_URI }}:${{ env.IMAGE_TAG }}`
-            Immutable tag: `${{ env.IMAGE_TAG }}`
 
-      - name: Skip release for non-tag execution
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "GitHub Release creation is skipped because this run was not triggered by a semantic Git tag."
-
-  configure_kubectl:
-    name: 19 - Configure kubectl
+  deploy:
+    name: Deploy
     runs-on: ubuntu-latest
     needs:
-      - create_github_release
-    steps:
-      - name: Configure kubectl
-        uses: azure/setup-kubectl@v4
-
-  configure_kubeconfig_for_eks:
-    name: 20 - Configure kubeconfig for EKS
-    runs-on: ubuntu-latest
-    needs:
-      - configure_kubectl
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Configure kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Configure kubeconfig for Amazon EKS
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws eks update-kubeconfig \
-            --name "${EKS_CLUSTER_NAME}" \
-            --region "${AWS_REGION}" \
-            --alias "${EKS_CLUSTER_NAME}"
-
-      - name: Verify Kubernetes API access
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl version --client
-          kubectl auth can-i get pods --namespace "${K8S_NAMESPACE}"
-
-  deploy_kubernetes_manifests:
-    name: 21 - Deploy Kubernetes Manifests
-    runs-on: ubuntu-latest
-    needs:
-      - configure_kubeconfig_for_eks
+      - build
     environment:
       name: production
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -910,561 +420,41 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
+          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}" --alias "${EKS_CLUSTER_NAME}"
 
-      - name: Deploy Kubernetes manifests
+      - name: Deploy manifests and update images
         shell: bash
         run: |
           set -euo pipefail
           kubectl apply -f "${K8S_MANIFESTS_DIR}"
-
-      - name: Kubernetes diagnostics on failure
-        if: failure()
-        shell: bash
-        run: |
-          set +e
-          kubectl get pods --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl describe pods --namespace "${K8S_NAMESPACE}"
-          kubectl get deployments --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get services --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get ingress --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get events --namespace "${K8S_NAMESPACE}" --sort-by=.lastTimestamp
-          kubectl logs --namespace "${K8S_NAMESPACE}" --all-containers --tail=200 -l app.kubernetes.io/name=note-app
-
-  update_backend_deployment_image:
-    name: 22 - Update Backend Deployment Image
-    runs-on: ubuntu-latest
-    needs:
-      - deploy_kubernetes_manifests
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Configure kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Configure kubeconfig for Amazon EKS
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
-
-      - name: Update backend image and rollout metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          kubectl set image deployment/"${BACKEND_DEPLOYMENT_NAME}" \
-            "${BACKEND_CONTAINER_NAME}"="${BACKEND_IMAGE_URI}:${IMAGE_TAG}" \
-            --namespace "${K8S_NAMESPACE}"
-
-          kubectl annotate deployment/"${BACKEND_DEPLOYMENT_NAME}" \
-            --namespace "${K8S_NAMESPACE}" \
-            kubernetes.io/change-cause="GitHub Actions ${GITHUB_WORKFLOW} run ${GITHUB_RUN_ID} deployed backend ${GITHUB_SHA}" \
-            --overwrite
-
-          kubectl label deployment/"${BACKEND_DEPLOYMENT_NAME}" \
-            --namespace "${K8S_NAMESPACE}" \
-            app.kubernetes.io/version="${IMAGE_TAG}" \
-            app.kubernetes.io/managed-by=github-actions \
-            --overwrite
-
-      - name: Kubernetes diagnostics on failure
-        if: failure()
-        shell: bash
-        run: |
-          set +e
-          kubectl get pods --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl describe pods --namespace "${K8S_NAMESPACE}"
-          kubectl get deployments --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get services --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get ingress --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get events --namespace "${K8S_NAMESPACE}" --sort-by=.lastTimestamp
-          kubectl logs --namespace "${K8S_NAMESPACE}" --all-containers --tail=200 -l app.kubernetes.io/name=note-app
-
-  update_frontend_deployment_image:
-    name: 23 - Update Frontend Deployment Image
-    runs-on: ubuntu-latest
-    needs:
-      - update_backend_deployment_image
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Configure kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Configure kubeconfig for Amazon EKS
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
-
-      - name: Update frontend image and rollout metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          kubectl set image deployment/"${FRONTEND_DEPLOYMENT_NAME}" \
-            "${FRONTEND_CONTAINER_NAME}"="${FRONTEND_IMAGE_URI}:${IMAGE_TAG}" \
-            --namespace "${K8S_NAMESPACE}"
-
-          kubectl annotate deployment/"${FRONTEND_DEPLOYMENT_NAME}" \
-            --namespace "${K8S_NAMESPACE}" \
-            kubernetes.io/change-cause="GitHub Actions ${GITHUB_WORKFLOW} run ${GITHUB_RUN_ID} deployed frontend ${GITHUB_SHA}" \
-            --overwrite
-
-          kubectl label deployment/"${FRONTEND_DEPLOYMENT_NAME}" \
-            --namespace "${K8S_NAMESPACE}" \
-            app.kubernetes.io/version="${IMAGE_TAG}" \
-            app.kubernetes.io/managed-by=github-actions \
-            --overwrite
-
-      - name: Kubernetes diagnostics on failure
-        if: failure()
-        shell: bash
-        run: |
-          set +e
-          kubectl get pods --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl describe pods --namespace "${K8S_NAMESPACE}"
-          kubectl get deployments --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get services --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get ingress --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get events --namespace "${K8S_NAMESPACE}" --sort-by=.lastTimestamp
-          kubectl logs --namespace "${K8S_NAMESPACE}" --all-containers --tail=200 -l app.kubernetes.io/name=note-app
-
-  wait_for_backend_rollout:
-    name: 24 - Wait for Backend Rollout
-    runs-on: ubuntu-latest
-    needs:
-      - update_frontend_deployment_image
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Configure kubectl and kubeconfig
-        uses: azure/setup-kubectl@v4
-
-      - name: Configure kubeconfig for Amazon EKS
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
-
-      - name: Wait for backend rollout
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl rollout status deployment/"${BACKEND_DEPLOYMENT_NAME}" \
-            --namespace "${K8S_NAMESPACE}" \
-            --timeout="${ROLLOUT_TIMEOUT}"
-
-      - name: Kubernetes diagnostics on failure
-        if: failure()
-        shell: bash
-        run: |
-          set +e
-          kubectl get pods --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl describe pods --namespace "${K8S_NAMESPACE}"
-          kubectl get deployments --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get services --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get ingress --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get events --namespace "${K8S_NAMESPACE}" --sort-by=.lastTimestamp
-          kubectl logs --namespace "${K8S_NAMESPACE}" --all-containers --tail=200 -l app.kubernetes.io/name=note-app
-
-  wait_for_frontend_rollout:
-    name: 25 - Wait for Frontend Rollout
-    runs-on: ubuntu-latest
-    needs:
-      - wait_for_backend_rollout
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Configure kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Configure kubeconfig for Amazon EKS
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
-
-      - name: Wait for frontend rollout
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl rollout status deployment/"${FRONTEND_DEPLOYMENT_NAME}" \
-            --namespace "${K8S_NAMESPACE}" \
-            --timeout="${ROLLOUT_TIMEOUT}"
-
-      - name: Kubernetes diagnostics on failure
-        if: failure()
-        shell: bash
-        run: |
-          set +e
-          kubectl get pods --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl describe pods --namespace "${K8S_NAMESPACE}"
-          kubectl get deployments --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get services --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get ingress --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get events --namespace "${K8S_NAMESPACE}" --sort-by=.lastTimestamp
-          kubectl logs --namespace "${K8S_NAMESPACE}" --all-containers --tail=200 -l app.kubernetes.io/name=note-app
-
-  verify_deployment:
-    name: 26 - Verify Deployment
-    runs-on: ubuntu-latest
-    needs:
-      - wait_for_frontend_rollout
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Configure kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Configure kubeconfig for Amazon EKS
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
-
-      - name: Verify deployments are available
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl wait deployment/"${BACKEND_DEPLOYMENT_NAME}" \
-            --namespace "${K8S_NAMESPACE}" \
-            --for=condition=Available \
-            --timeout="${ROLLOUT_TIMEOUT}"
-          kubectl wait deployment/"${FRONTEND_DEPLOYMENT_NAME}" \
-            --namespace "${K8S_NAMESPACE}" \
-            --for=condition=Available \
-            --timeout="${ROLLOUT_TIMEOUT}"
-
-  verify_running_images:
-    name: 27 - Verify Running Images
-    runs-on: ubuntu-latest
-    needs:
-      - verify_deployment
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Configure kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Configure kubeconfig for Amazon EKS
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
-
-      - name: Verify backend and frontend running images
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          backend_image="$(kubectl get deployment "${BACKEND_DEPLOYMENT_NAME}" \
-            --namespace "${K8S_NAMESPACE}" \
-            -o jsonpath="{.spec.template.spec.containers[?(@.name=='${BACKEND_CONTAINER_NAME}')].image}")"
-
-          frontend_image="$(kubectl get deployment "${FRONTEND_DEPLOYMENT_NAME}" \
-            --namespace "${K8S_NAMESPACE}" \
-            -o jsonpath="{.spec.template.spec.containers[?(@.name=='${FRONTEND_CONTAINER_NAME}')].image}")"
-
-          test "${backend_image}" = "${BACKEND_IMAGE_URI}:${IMAGE_TAG}"
-          test "${frontend_image}" = "${FRONTEND_IMAGE_URI}:${IMAGE_TAG}"
-
-  verify_pods:
-    name: 28 - Verify Pods
-    runs-on: ubuntu-latest
-    needs:
-      - verify_running_images
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Configure kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Configure kubeconfig for Amazon EKS
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
-
-      - name: Verify pods are ready
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl get pods --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl wait pod \
-            --namespace "${K8S_NAMESPACE}" \
-            --selector app.kubernetes.io/name=note-app \
-            --for=condition=Ready \
-            --timeout="${ROLLOUT_TIMEOUT}"
-
-  verify_services:
-    name: 29 - Verify Services
-    runs-on: ubuntu-latest
-    needs:
-      - verify_pods
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Configure kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Configure kubeconfig for Amazon EKS
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
-
-      - name: Verify Kubernetes services
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl get service backend --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get service frontend --namespace "${K8S_NAMESPACE}" -o wide
-
-  verify_ingress:
-    name: 30 - Verify Ingress
-    runs-on: ubuntu-latest
-    needs:
-      - verify_services
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Configure kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Configure kubeconfig for Amazon EKS
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
-
-      - name: Verify Kubernetes ingress
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl get ingress --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl wait ingress \
-            --namespace "${K8S_NAMESPACE}" \
-            --all \
-            --for=jsonpath='{.status.loadBalancer.ingress[0].hostname}' \
-            --timeout="${ROLLOUT_TIMEOUT}"
-
-  verify_rollout_status:
-    name: 31 - Verify Rollout Status
-    runs-on: ubuntu-latest
-    needs:
-      - verify_ingress
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Configure kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Configure kubeconfig for Amazon EKS
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
-
-      - name: Verify rollout status
+          kubectl set image deployment/"${BACKEND_DEPLOYMENT_NAME}" "${BACKEND_CONTAINER_NAME}"="${{ needs.build.outputs.backend_deploy_image }}" --namespace "${K8S_NAMESPACE}"
+          kubectl set image deployment/"${FRONTEND_DEPLOYMENT_NAME}" "${FRONTEND_CONTAINER_NAME}"="${{ needs.build.outputs.frontend_deploy_image }}" --namespace "${K8S_NAMESPACE}"
+          kubectl annotate deployment/"${BACKEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" kubernetes.io/change-cause="GitHub Actions ${GITHUB_RUN_ID} deployed backend ${GITHUB_SHA}" --overwrite
+          kubectl annotate deployment/"${FRONTEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" kubernetes.io/change-cause="GitHub Actions ${GITHUB_RUN_ID} deployed frontend ${GITHUB_SHA}" --overwrite
+
+      - name: Verify rollout and running resources
         shell: bash
         run: |
           set -euo pipefail
           kubectl rollout status deployment/"${BACKEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
           kubectl rollout status deployment/"${FRONTEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
+          kubectl wait deployment/"${BACKEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" --for=condition=Available --timeout="${ROLLOUT_TIMEOUT}"
+          kubectl wait deployment/"${FRONTEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" --for=condition=Available --timeout="${ROLLOUT_TIMEOUT}"
+          backend_image="$(kubectl get deployment "${BACKEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" -o jsonpath="{.spec.template.spec.containers[?(@.name=='${BACKEND_CONTAINER_NAME}')].image}")"
+          frontend_image="$(kubectl get deployment "${FRONTEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" -o jsonpath="{.spec.template.spec.containers[?(@.name=='${FRONTEND_CONTAINER_NAME}')].image}")"
+          test "${backend_image}" = "${{ needs.build.outputs.backend_deploy_image }}"
+          test "${frontend_image}" = "${{ needs.build.outputs.frontend_deploy_image }}"
+          kubectl get pods --namespace "${K8S_NAMESPACE}" -o wide
+          kubectl get services --namespace "${K8S_NAMESPACE}" -o wide
+          kubectl get ingress --namespace "${K8S_NAMESPACE}" -o wide
           kubectl rollout history deployment/"${BACKEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}"
           kubectl rollout history deployment/"${FRONTEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}"
-
-  print_deployment_summary:
-    name: 32 - Print Deployment Summary
-    runs-on: ubuntu-latest
-    needs:
-      - verify_rollout_status
-    steps:
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Configure kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Configure kubeconfig for Amazon EKS
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
 
       - name: Print deployment summary
         shell: bash
         run: |
           set -euo pipefail
-
           ingress_address="$(kubectl get ingress --namespace "${K8S_NAMESPACE}" -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
-
           {
             echo "## Enterprise CI/CD Deployment Summary"
             echo ""
@@ -1472,18 +462,23 @@ jobs:
             echo "| --- | --- |"
             echo "| Repository | ${GITHUB_REPOSITORY} |"
             echo "| Commit | ${GITHUB_SHA} |"
-            echo "| Commit SHA | ${GITHUB_SHA} |"
-            echo "| Ref | ${GITHUB_REF_NAME} |"
             echo "| AWS Region | ${AWS_REGION} |"
             echo "| EKS Cluster | ${EKS_CLUSTER_NAME} |"
             echo "| Namespace | ${K8S_NAMESPACE} |"
-            echo "| Backend Image | ${BACKEND_IMAGE_URI}:${IMAGE_TAG} |"
-            echo "| Frontend Image | ${FRONTEND_IMAGE_URI}:${IMAGE_TAG} |"
-            echo "| Published Tags | SHA plus semantic tag for tag runs and latest for main |"
+            echo "| Backend Image | ${{ needs.build.outputs.backend_deploy_image }} |"
+            echo "| Frontend Image | ${{ needs.build.outputs.frontend_deploy_image }} |"
             echo "| Ingress | ${ingress_address:-pending} |"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-          kubectl get deployments --namespace "${K8S_NAMESPACE}" -o wide
+      - name: Kubernetes diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          set +e
           kubectl get pods --namespace "${K8S_NAMESPACE}" -o wide
+          kubectl describe pods --namespace "${K8S_NAMESPACE}"
+          kubectl get deployments --namespace "${K8S_NAMESPACE}" -o wide
           kubectl get services --namespace "${K8S_NAMESPACE}" -o wide
           kubectl get ingress --namespace "${K8S_NAMESPACE}" -o wide
+          kubectl get events --namespace "${K8S_NAMESPACE}" --sort-by=.lastTimestamp
+          kubectl logs --namespace "${K8S_NAMESPACE}" --all-containers --tail=200 -l app.kubernetes.io/name=note-app
