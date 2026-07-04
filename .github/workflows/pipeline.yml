@@ -1,485 +1,169 @@
-name: Enterprise CI/CD
+name: Build, Push, and Deploy to EKS
 
 on:
   push:
     branches:
       - main
-    tags:
-      - "v*.*.*"
+      - mobypay
   workflow_dispatch:
-
-concurrency:
-  group: enterprise-cicd-${{ github.ref }}
-  cancel-in-progress: false
 
 permissions:
   contents: read
-  id-token: write
-  security-events: write
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
-  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID || '009907128734' }}
   BACKEND_ECR_REPOSITORY: ${{ vars.BACKEND_ECR_REPOSITORY || 'note-backend' }}
   FRONTEND_ECR_REPOSITORY: ${{ vars.FRONTEND_ECR_REPOSITORY || 'note-frontend' }}
   EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || 'note-app-eks' }}
   K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE || 'note-app' }}
+  K8S_MANIFESTS_DIR: k8s
+  BACKEND_CONTEXT: backend
+  FRONTEND_CONTEXT: frontend
   BACKEND_DEPLOYMENT_NAME: ${{ vars.BACKEND_DEPLOYMENT_NAME || 'backend' }}
   FRONTEND_DEPLOYMENT_NAME: ${{ vars.FRONTEND_DEPLOYMENT_NAME || 'frontend' }}
   BACKEND_CONTAINER_NAME: ${{ vars.BACKEND_CONTAINER_NAME || 'backend' }}
   FRONTEND_CONTAINER_NAME: ${{ vars.FRONTEND_CONTAINER_NAME || 'frontend' }}
-  BACKEND_CONTEXT: backend
-  FRONTEND_CONTEXT: frontend
-  K8S_MANIFESTS_DIR: k8s
-  TERRAFORM_DIR: terraform
-  PYTHON_VERSION: "3.12"
-  TERRAFORM_VERSION: "1.8.5"
-  IMAGE_TAG: ${{ github.sha }}
-  BACKEND_IMAGE_URI: ${{ vars.AWS_ACCOUNT_ID || '009907128734' }}.dkr.ecr.${{ vars.AWS_REGION || 'ap-southeast-2' }}.amazonaws.com/${{ vars.BACKEND_ECR_REPOSITORY || 'note-backend' }}
-  FRONTEND_IMAGE_URI: ${{ vars.AWS_ACCOUNT_ID || '009907128734' }}.dkr.ecr.${{ vars.AWS_REGION || 'ap-southeast-2' }}.amazonaws.com/${{ vars.FRONTEND_ECR_REPOSITORY || 'note-frontend' }}
-  DOCKER_BUILDKIT: "1"
-  BUILDKIT_PROGRESS: plain
   ROLLOUT_TIMEOUT: 300s
-  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-  AWS_ACCESS_KEY_ID_VALUE: ${{ secrets.AWS_ACCESS_KEY_ID }}
 
 jobs:
-  test:
-    name: 2. Test
+  build-and-push:
+    name: Build and Push Images
     runs-on: ubuntu-latest
-    needs:
-      - build
-    env:
-      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Validate repository structure
-        shell: bash
-        run: |
-          set -euo pipefail
-          required_paths=(
-            ".github/workflows/pipeline.yml"
-            "${BACKEND_CONTEXT}/Dockerfile"
-            "${BACKEND_CONTEXT}/requirements.txt"
-            "${BACKEND_CONTEXT}/tests"
-            "${FRONTEND_CONTEXT}/Dockerfile"
-            "${FRONTEND_CONTEXT}/index.html"
-            "${K8S_MANIFESTS_DIR}/backend-deployment.yaml"
-            "${K8S_MANIFESTS_DIR}/frontend-deployment.yaml"
-            "${K8S_MANIFESTS_DIR}/backend-service.yaml"
-            "${K8S_MANIFESTS_DIR}/frontend-service.yaml"
-            "${K8S_MANIFESTS_DIR}/ingress.yaml"
-            "${TERRAFORM_DIR}/versions.tf"
-            "${TERRAFORM_DIR}/provider.tf"
-            "${TERRAFORM_DIR}/main.tf"
-          )
-          for path in "${required_paths[@]}"; do
-            if [[ ! -e "${path}" ]]; then
-              echo "::error title=Repository structure validation failed::Missing required path: ${path}"
-              exit 1
-            fi
-          done
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: ${{ env.BACKEND_CONTEXT }}/requirements.txt
-
-      - name: Install validation and backend dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install PyYAML==6.0.2
-          python -m pip install -r "${BACKEND_CONTEXT}/requirements.txt"
-
-      - name: Validate Kubernetes manifests offline
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          from pathlib import Path
-          import sys
-          import yaml
-
-          manifest_dir = Path("k8s")
-          failures = []
-          resources = []
-
-          for path in sorted(manifest_dir.glob("*.yaml")):
-              try:
-                  documents = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
-              except yaml.YAMLError as exc:
-                  failures.append(f"{path}: invalid YAML: {exc}")
-                  continue
-
-              for index, document in enumerate(documents, start=1):
-                  if document is None:
-                      continue
-                  if not isinstance(document, dict):
-                      failures.append(f"{path} document {index}: document must be a YAML mapping")
-                      continue
-                  api_version = document.get("apiVersion")
-                  kind = document.get("kind")
-                  metadata = document.get("metadata")
-                  if not api_version:
-                      failures.append(f"{path} document {index}: missing apiVersion")
-                  if not kind:
-                      failures.append(f"{path} document {index}: missing kind")
-                  if not isinstance(metadata, dict):
-                      failures.append(f"{path} document {index}: missing metadata mapping")
-                      continue
-                  if not metadata.get("name"):
-                      failures.append(f"{path} document {index}: missing metadata.name")
-                  resources.append(f"{api_version}/{kind}/{metadata.get('namespace', 'cluster-scope')}/{metadata.get('name')}")
-
-          if failures:
-              print("Kubernetes manifest validation failed:", file=sys.stderr)
-              for failure in failures:
-                  print(f"  - {failure}", file=sys.stderr)
-              sys.exit(1)
-
-          print("Validated Kubernetes resources:")
-          for resource in resources:
-              print(f"  - {resource}")
-          PY
-
-      - name: Validate Python syntax
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import ast
-          from pathlib import Path
-          for path in Path("backend").rglob("*.py"):
-              ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-          print("Python syntax validation passed.")
-          PY
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      - name: Cache Terraform providers
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
-          key: terraform-${{ runner.os }}-${{ hashFiles('terraform/.terraform.lock.hcl', 'terraform/**/*.tf') }}
-          restore-keys: |
-            terraform-${{ runner.os }}-
-
-      - name: Validate Terraform
-        shell: bash
-        working-directory: ${{ env.TERRAFORM_DIR }}
-        run: |
-          set -euo pipefail
-          mkdir -p "${TF_PLUGIN_CACHE_DIR}"
-          terraform fmt -check -recursive
-          terraform init -backend=false -input=false -no-color
-          terraform validate -no-color
-
-      - name: Run backend unit tests
-        shell: bash
-        working-directory: ${{ env.BACKEND_CONTEXT }}
-        run: |
-          set -euo pipefail
-          python -m unittest discover -s tests -p "test_*.py" -v
-
-  build:
-    name: 1. Build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      id-token: write
-      security-events: write
     outputs:
-      short_sha: ${{ steps.image_tags.outputs.short_sha }}
-      backend_deploy_image: ${{ steps.image_tags.outputs.backend_deploy_image }}
-      frontend_deploy_image: ${{ steps.image_tags.outputs.frontend_deploy_image }}
+      backend_image_uri: ${{ steps.image-uri.outputs.backend_image_uri }}
+      frontend_image_uri: ${{ steps.image-uri.outputs.frontend_image_uri }}
+
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Generate image tags
-        id: image_tags
-        shell: bash
+      - name: Validate AWS secrets
         run: |
           set -euo pipefail
-          mkdir -p .pipeline
-          short_sha="$(git rev-parse --short=12 HEAD)"
-          {
-            echo "${BACKEND_IMAGE_URI}:${IMAGE_TAG}"
-            [[ "${GITHUB_REF}" == refs/tags/v* ]] && echo "${BACKEND_IMAGE_URI}:${GITHUB_REF_NAME}"
-            [[ "${GITHUB_REF}" == "refs/heads/main" ]] && echo "${BACKEND_IMAGE_URI}:latest"
-          } > .pipeline/backend-tags.txt
-          {
-            echo "${FRONTEND_IMAGE_URI}:${IMAGE_TAG}"
-            [[ "${GITHUB_REF}" == refs/tags/v* ]] && echo "${FRONTEND_IMAGE_URI}:${GITHUB_REF_NAME}"
-            [[ "${GITHUB_REF}" == "refs/heads/main" ]] && echo "${FRONTEND_IMAGE_URI}:latest"
-          } > .pipeline/frontend-tags.txt
-          {
-            echo "backend_tags<<EOF"
-            cat .pipeline/backend-tags.txt
-            echo "EOF"
-            echo "frontend_tags<<EOF"
-            cat .pipeline/frontend-tags.txt
-            echo "EOF"
-            echo "short_sha=${short_sha}"
-            echo "backend_deploy_image=${BACKEND_IMAGE_URI}:${IMAGE_TAG}"
-            echo "frontend_deploy_image=${FRONTEND_IMAGE_URI}:${IMAGE_TAG}"
-          } >> "${GITHUB_OUTPUT}"
-
-      - name: Validate AWS authentication inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${AWS_ROLE_TO_ASSUME}" && -z "${AWS_ACCESS_KEY_ID_VALUE}" ]]; then
-            echo "::error title=AWS authentication unavailable::Configure secrets.AWS_ROLE_TO_ASSUME for GitHub OIDC or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY for key-based fallback."
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] || [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY secrets are required."
             exit 1
           fi
 
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
 
       - name: Login to Amazon ECR
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-        with:
-          mask-password: true
 
-      - name: Setup Docker Buildx
+      - name: Set image URI variables
+        id: image-uri
+        run: |
+          set -euo pipefail
+          BACKEND_IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.BACKEND_ECR_REPOSITORY }}:${GITHUB_SHA}"
+          FRONTEND_IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.FRONTEND_ECR_REPOSITORY }}:${GITHUB_SHA}"
+          BACKEND_LATEST_IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.BACKEND_ECR_REPOSITORY }}:latest"
+          FRONTEND_LATEST_IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.FRONTEND_ECR_REPOSITORY }}:latest"
+
+          echo "BACKEND_IMAGE_URI=${BACKEND_IMAGE_URI}" >> "${GITHUB_ENV}"
+          echo "FRONTEND_IMAGE_URI=${FRONTEND_IMAGE_URI}" >> "${GITHUB_ENV}"
+          echo "BACKEND_LATEST_IMAGE_URI=${BACKEND_LATEST_IMAGE_URI}" >> "${GITHUB_ENV}"
+          echo "FRONTEND_LATEST_IMAGE_URI=${FRONTEND_LATEST_IMAGE_URI}" >> "${GITHUB_ENV}"
+          echo "backend_image_uri=${BACKEND_IMAGE_URI}" >> "${GITHUB_OUTPUT}"
+          echo "frontend_image_uri=${FRONTEND_IMAGE_URI}" >> "${GITHUB_OUTPUT}"
+          echo "backend_latest_image_uri=${BACKEND_LATEST_IMAGE_URI}" >> "${GITHUB_OUTPUT}"
+          echo "frontend_latest_image_uri=${FRONTEND_LATEST_IMAGE_URI}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build backend Docker image
+      - name: Build and push backend image
         uses: docker/build-push-action@v6
         with:
           context: ${{ env.BACKEND_CONTEXT }}
           file: ${{ env.BACKEND_CONTEXT }}/Dockerfile
-          load: true
-          push: false
-          tags: ${{ steps.image_tags.outputs.backend_tags }}
-          labels: |
-            org.opencontainers.image.title=NoteApp Backend
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-          cache-from: type=gha,scope=backend-build
-          cache-to: type=gha,mode=max,scope=backend-build
+          push: true
+          tags: |
+            ${{ steps.image-uri.outputs.backend_image_uri }}
+            ${{ steps.image-uri.outputs.backend_latest_image_uri }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
 
-      - name: Build frontend Docker image
+      - name: Build and push frontend image
         uses: docker/build-push-action@v6
         with:
           context: ${{ env.FRONTEND_CONTEXT }}
           file: ${{ env.FRONTEND_CONTEXT }}/Dockerfile
-          load: true
-          push: false
-          tags: ${{ steps.image_tags.outputs.frontend_tags }}
-          labels: |
-            org.opencontainers.image.title=NoteApp Frontend
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-          cache-from: type=gha,scope=frontend-build
-          cache-to: type=gha,mode=max,scope=frontend-build
-
-      - name: Scan backend image with Trivy
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ${{ env.BACKEND_IMAGE_URI }}:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: backend-trivy-results.sarif
-          severity: CRITICAL,HIGH
-          vuln-type: os,library
-          ignore-unfixed: true
-          exit-code: 1
-
-      - name: Upload backend Trivy SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: backend-trivy-results.sarif
-
-      - name: Scan frontend image with Trivy
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ${{ env.FRONTEND_IMAGE_URI }}:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: frontend-trivy-results.sarif
-          severity: CRITICAL,HIGH
-          vuln-type: os,library
-          ignore-unfixed: true
-          exit-code: 1
-
-      - name: Upload frontend Trivy SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: frontend-trivy-results.sarif
-
-      - name: Push images to Amazon ECR
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r image; do [[ -n "${image}" ]] && docker push "${image}"; done < .pipeline/backend-tags.txt
-          while IFS= read -r image; do [[ -n "${image}" ]] && docker push "${image}"; done < .pipeline/frontend-tags.txt
-
-      - name: Generate build metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p build-metadata
-          cat > build-metadata/deployment-summary.json <<JSON
-          {
-            "repository": "${GITHUB_REPOSITORY}",
-            "workflow": "${GITHUB_WORKFLOW}",
-            "run_id": "${GITHUB_RUN_ID}",
-            "commit_sha": "${GITHUB_SHA}",
-            "short_sha": "${{ steps.image_tags.outputs.short_sha }}",
-            "backend_image": "${BACKEND_IMAGE_URI}:${IMAGE_TAG}",
-            "frontend_image": "${FRONTEND_IMAGE_URI}:${IMAGE_TAG}",
-            "aws_region": "${AWS_REGION}",
-            "eks_cluster": "${EKS_CLUSTER_NAME}",
-            "kubernetes_namespace": "${K8S_NAMESPACE}"
-          }
-          JSON
-
-      - name: Upload build metadata
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-metadata-${{ steps.image_tags.outputs.short_sha }}
-          path: build-metadata/
-          retention-days: 30
-
-      - name: Create GitHub Release for semantic tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: build-metadata/deployment-summary.json
-          body: |
-            Production image publication completed.
-
-            Backend image: `${{ env.BACKEND_IMAGE_URI }}:${{ env.IMAGE_TAG }}`
-            Frontend image: `${{ env.FRONTEND_IMAGE_URI }}:${{ env.IMAGE_TAG }}`
+          push: true
+          tags: |
+            ${{ steps.image-uri.outputs.frontend_image_uri }}
+            ${{ steps.image-uri.outputs.frontend_latest_image_uri }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
 
   deploy:
-    name: 3. Deploy
+    name: Deploy to EKS
+    needs: build-and-push
     runs-on: ubuntu-latest
-    needs:
-      - build
-      - test
-    environment:
-      name: production
-    permissions:
-      contents: read
-      id-token: write
+
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Authenticate to AWS with GitHub OIDC
-        if: env.AWS_ROLE_TO_ASSUME != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Authenticate to AWS with access keys
-        if: env.AWS_ROLE_TO_ASSUME == ''
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
 
       - name: Configure kubectl
         uses: azure/setup-kubectl@v4
 
-      - name: Configure kubeconfig for Amazon EKS
-        shell: bash
+      - name: Configure kubeconfig for EKS
         run: |
           set -euo pipefail
-          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}" --alias "${EKS_CLUSTER_NAME}"
+          aws eks update-kubeconfig \
+            --name "${EKS_CLUSTER_NAME}" \
+            --region "${AWS_REGION}" \
+            --alias "${EKS_CLUSTER_NAME}"
 
-      - name: Deploy manifests and update images
-        shell: bash
+      - name: Deploy manifests to EKS
         run: |
           set -euo pipefail
           kubectl apply -f "${K8S_MANIFESTS_DIR}"
-          kubectl set image deployment/"${BACKEND_DEPLOYMENT_NAME}" "${BACKEND_CONTAINER_NAME}"="${{ needs.build.outputs.backend_deploy_image }}" --namespace "${K8S_NAMESPACE}"
-          kubectl set image deployment/"${FRONTEND_DEPLOYMENT_NAME}" "${FRONTEND_CONTAINER_NAME}"="${{ needs.build.outputs.frontend_deploy_image }}" --namespace "${K8S_NAMESPACE}"
-          kubectl annotate deployment/"${BACKEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" kubernetes.io/change-cause="GitHub Actions ${GITHUB_RUN_ID} deployed backend ${GITHUB_SHA}" --overwrite
-          kubectl annotate deployment/"${FRONTEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" kubernetes.io/change-cause="GitHub Actions ${GITHUB_RUN_ID} deployed frontend ${GITHUB_SHA}" --overwrite
 
-      - name: Verify rollout and running resources
-        shell: bash
+      - name: Update Kubernetes deployment images
         run: |
           set -euo pipefail
-          kubectl rollout status deployment/"${BACKEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
-          kubectl rollout status deployment/"${FRONTEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
-          kubectl wait deployment/"${BACKEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" --for=condition=Available --timeout="${ROLLOUT_TIMEOUT}"
-          kubectl wait deployment/"${FRONTEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" --for=condition=Available --timeout="${ROLLOUT_TIMEOUT}"
-          backend_image="$(kubectl get deployment "${BACKEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" -o jsonpath="{.spec.template.spec.containers[?(@.name=='${BACKEND_CONTAINER_NAME}')].image}")"
-          frontend_image="$(kubectl get deployment "${FRONTEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}" -o jsonpath="{.spec.template.spec.containers[?(@.name=='${FRONTEND_CONTAINER_NAME}')].image}")"
-          test "${backend_image}" = "${{ needs.build.outputs.backend_deploy_image }}"
-          test "${frontend_image}" = "${{ needs.build.outputs.frontend_deploy_image }}"
+          kubectl set image deployment/"${BACKEND_DEPLOYMENT_NAME}" \
+            "${BACKEND_CONTAINER_NAME}"="${{ needs.build-and-push.outputs.backend_image_uri }}" \
+            --namespace "${K8S_NAMESPACE}"
+
+          kubectl set image deployment/"${FRONTEND_DEPLOYMENT_NAME}" \
+            "${FRONTEND_CONTAINER_NAME}"="${{ needs.build-and-push.outputs.frontend_image_uri }}" \
+            --namespace "${K8S_NAMESPACE}"
+
+      - name: Verify EKS rollout
+        run: |
+          set -euo pipefail
+          kubectl rollout status deployment/"${BACKEND_DEPLOYMENT_NAME}" \
+            --namespace "${K8S_NAMESPACE}" \
+            --timeout="${ROLLOUT_TIMEOUT}"
+
+          kubectl rollout status deployment/"${FRONTEND_DEPLOYMENT_NAME}" \
+            --namespace "${K8S_NAMESPACE}" \
+            --timeout="${ROLLOUT_TIMEOUT}"
+
           kubectl get pods --namespace "${K8S_NAMESPACE}" -o wide
           kubectl get services --namespace "${K8S_NAMESPACE}" -o wide
           kubectl get ingress --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl rollout history deployment/"${BACKEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}"
-          kubectl rollout history deployment/"${FRONTEND_DEPLOYMENT_NAME}" --namespace "${K8S_NAMESPACE}"
 
-      - name: Print deployment summary
-        shell: bash
-        run: |
-          set -euo pipefail
-          ingress_address="$(kubectl get ingress --namespace "${K8S_NAMESPACE}" -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
-          {
-            echo "## Enterprise CI/CD Deployment Summary"
-            echo ""
-            echo "| Field | Value |"
-            echo "| --- | --- |"
-            echo "| Repository | ${GITHUB_REPOSITORY} |"
-            echo "| Commit | ${GITHUB_SHA} |"
-            echo "| AWS Region | ${AWS_REGION} |"
-            echo "| EKS Cluster | ${EKS_CLUSTER_NAME} |"
-            echo "| Namespace | ${K8S_NAMESPACE} |"
-            echo "| Backend Image | ${{ needs.build.outputs.backend_deploy_image }} |"
-            echo "| Frontend Image | ${{ needs.build.outputs.frontend_deploy_image }} |"
-            echo "| Ingress | ${ingress_address:-pending} |"
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Kubernetes diagnostics on failure
+      - name: Deployment diagnostics on failure
         if: failure()
-        shell: bash
         run: |
-          set +e
-          kubectl get pods --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl describe pods --namespace "${K8S_NAMESPACE}"
-          kubectl get deployments --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get services --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get ingress --namespace "${K8S_NAMESPACE}" -o wide
-          kubectl get events --namespace "${K8S_NAMESPACE}" --sort-by=.lastTimestamp
-          kubectl logs --namespace "${K8S_NAMESPACE}" --all-containers --tail=200 -l app.kubernetes.io/name=note-app
+          kubectl get pods --namespace "${K8S_NAMESPACE}" -o wide || true
+          kubectl describe pods --namespace "${K8S_NAMESPACE}" || true
+          kubectl get events --namespace "${K8S_NAMESPACE}" --sort-by=.lastTimestamp || true
