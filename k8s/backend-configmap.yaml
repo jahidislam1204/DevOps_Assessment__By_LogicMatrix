@@ -8,7 +8,7 @@ metadata:
   labels:
     app.kubernetes.io/name: note-app
     app.kubernetes.io/component: backend
-    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/version: bootstrap
     app.kubernetes.io/managed-by: kubectl
 data:
   # Application runtime mode used by Flask and supporting libraries.
@@ -16,7 +16,7 @@ data:
   # Log verbosity should stay predictable in production for easier alerting.
   LOG_LEVEL: "INFO"
   # Private RDS endpoint provisioned by Terraform.
-  DB_HOST: "note-app-mysql.xxxxx.ap-southeast-2.rds.amazonaws.com"
+  DB_HOST: "prod-note-app-eks-mysql.cj8204su4ghu.ap-southeast-2.rds.amazonaws.com"
   # MySQL default port.
   DB_PORT: "3306"
   # Logical database name used by the application.

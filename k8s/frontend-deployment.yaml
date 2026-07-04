@@ -8,7 +8,7 @@ metadata:
   labels:
     app.kubernetes.io/name: note-app
     app.kubernetes.io/component: frontend
-    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/version: bootstrap
     app.kubernetes.io/managed-by: kubectl
 spec:
   replicas: 2
@@ -27,7 +27,7 @@ spec:
       labels:
         app.kubernetes.io/name: note-app
         app.kubernetes.io/component: frontend
-        app.kubernetes.io/version: "<IMAGE_TAG>"
+        app.kubernetes.io/version: bootstrap
         app.kubernetes.io/managed-by: kubectl
     spec:
       automountServiceAccountToken: false
@@ -40,7 +40,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: frontend
-          image: 009907128734.dkr.ecr.ap-southeast-2.amazonaws.com/note-frontend:<IMAGE_TAG>
+          image: 009907128734.dkr.ecr.ap-southeast-2.amazonaws.com/note-frontend:bootstrap
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

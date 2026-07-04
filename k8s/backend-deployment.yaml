@@ -8,7 +8,7 @@ metadata:
   labels:
     app.kubernetes.io/name: note-app
     app.kubernetes.io/component: backend
-    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/version: bootstrap
     app.kubernetes.io/managed-by: kubectl
 spec:
   replicas: 2
@@ -29,7 +29,7 @@ spec:
       labels:
         app.kubernetes.io/name: note-app
         app.kubernetes.io/component: backend
-        app.kubernetes.io/version: "<IMAGE_TAG>"
+        app.kubernetes.io/version: bootstrap
         app.kubernetes.io/managed-by: kubectl
     spec:
       # Dedicated ServiceAccount keeps the deployment ready for future IRSA use.
@@ -45,7 +45,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: backend
-          image: 009907128734.dkr.ecr.ap-southeast-2.amazonaws.com/note-backend:<IMAGE_TAG>
+          image: 009907128734.dkr.ecr.ap-southeast-2.amazonaws.com/note-backend:bootstrap
           # Never use latest in production so rollbacks remain deterministic.
           imagePullPolicy: IfNotPresent
           ports:

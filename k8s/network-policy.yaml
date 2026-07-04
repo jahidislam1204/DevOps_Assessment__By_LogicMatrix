@@ -17,7 +17,7 @@ metadata:
   labels:
     app.kubernetes.io/name: note-app
     app.kubernetes.io/component: security
-    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/version: bootstrap
     app.kubernetes.io/managed-by: kubectl
 spec:
   podSelector: {}
@@ -34,7 +34,7 @@ metadata:
   labels:
     app.kubernetes.io/name: note-app
     app.kubernetes.io/component: frontend
-    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/version: bootstrap
     app.kubernetes.io/managed-by: kubectl
 spec:
   podSelector:
@@ -57,7 +57,7 @@ metadata:
   labels:
     app.kubernetes.io/name: note-app
     app.kubernetes.io/component: frontend
-    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/version: bootstrap
     app.kubernetes.io/managed-by: kubectl
 spec:
   podSelector:
@@ -95,7 +95,7 @@ metadata:
   labels:
     app.kubernetes.io/name: note-app
     app.kubernetes.io/component: backend
-    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/version: bootstrap
     app.kubernetes.io/managed-by: kubectl
 spec:
   podSelector:
@@ -125,7 +125,7 @@ metadata:
   labels:
     app.kubernetes.io/name: note-app
     app.kubernetes.io/component: backend
-    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/version: bootstrap
     app.kubernetes.io/managed-by: kubectl
 spec:
   podSelector:

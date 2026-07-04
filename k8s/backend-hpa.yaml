@@ -8,7 +8,7 @@ metadata:
   labels:
     app.kubernetes.io/name: note-app
     app.kubernetes.io/component: backend
-    app.kubernetes.io/version: "<IMAGE_TAG>"
+    app.kubernetes.io/version: bootstrap
     app.kubernetes.io/managed-by: kubectl
 spec:
   scaleTargetRef:
