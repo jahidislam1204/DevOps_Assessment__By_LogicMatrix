@@ -139,19 +139,74 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure kubectl
-        uses: azure/setup-kubectl@v4
+      - name: Setup Python for offline manifest validation
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
 
-      - name: Validate Kubernetes manifests with client dry run
+      - name: Install manifest validation dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install PyYAML==6.0.2
+
+      - name: Validate Kubernetes manifests offline
         shell: bash
         run: |
           set -euo pipefail
 
-          kubectl create \
-            --dry-run=client \
-            --validate=false \
-            -f "${K8S_MANIFESTS_DIR}" \
-            -o name
+          python - <<'PY'
+          from pathlib import Path
+          import sys
+          import yaml
+
+          manifest_dir = Path("k8s")
+          failures = []
+          resources = []
+
+          for path in sorted(manifest_dir.glob("*.yaml")):
+              try:
+                  documents = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
+              except yaml.YAMLError as exc:
+                  failures.append(f"{path}: invalid YAML: {exc}")
+                  continue
+
+              for index, document in enumerate(documents, start=1):
+                  if document is None:
+                      continue
+                  if not isinstance(document, dict):
+                      failures.append(f"{path} document {index}: document must be a YAML mapping")
+                      continue
+
+                  api_version = document.get("apiVersion")
+                  kind = document.get("kind")
+                  metadata = document.get("metadata")
+
+                  if not api_version:
+                      failures.append(f"{path} document {index}: missing apiVersion")
+                  if not kind:
+                      failures.append(f"{path} document {index}: missing kind")
+                  if not isinstance(metadata, dict):
+                      failures.append(f"{path} document {index}: missing metadata mapping")
+                      continue
+                  if not metadata.get("name"):
+                      failures.append(f"{path} document {index}: missing metadata.name")
+
+                  namespace = metadata.get("namespace", "cluster-scope")
+                  resources.append(f"{api_version}/{kind}/{namespace}/{metadata.get('name')}")
+
+          if failures:
+              print("Kubernetes manifest validation failed:", file=sys.stderr)
+              for failure in failures:
+                  print(f"  - {failure}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Validated Kubernetes resources:")
+          for resource in resources:
+              print(f"  - {resource}")
+          PY
 
   validate_terraform_formatting:
     name: 04 - Validate Terraform Formatting
