@@ -27,7 +27,16 @@ spec:
   rules:
     - http:
         paths:
-          # All public traffic is forwarded to the frontend service.
+          # Browser API calls go through the public ALB and are forwarded to
+          # the private backend service inside the cluster.
+          - path: /notes
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8080
+          # All remaining public traffic is forwarded to the frontend service.
           - path: /
             pathType: Prefix
             backend:

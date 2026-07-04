@@ -2,12 +2,10 @@
    API CONFIGURATION
 ========================================== */
 
-// const API_URL = "http://backend:8080";
-
 const API_URL =
     window.location.hostname === "localhost"
         ? "http://localhost:8080"
-        : "http://backend:8080";
+        : window.location.origin;
 
 
 /* ==========================================
