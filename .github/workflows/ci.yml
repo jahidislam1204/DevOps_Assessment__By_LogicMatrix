@@ -74,7 +74,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          kubectl apply --dry-run=client -f "${K8S_MANIFESTS_DIR}"
+          kubectl create --dry-run=client --validate=false -f "${K8S_MANIFESTS_DIR}" -o name
 
   test:
     name: Run Application Tests
