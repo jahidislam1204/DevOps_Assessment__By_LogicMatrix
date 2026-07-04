@@ -303,7 +303,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=frontend-build
 
       - name: Scan backend image with Trivy
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.BACKEND_IMAGE_URI }}:${{ env.IMAGE_TAG }}
           format: sarif
@@ -320,7 +320,7 @@ jobs:
           sarif_file: backend-trivy-results.sarif
 
       - name: Scan frontend image with Trivy
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.FRONTEND_IMAGE_URI }}:${{ env.IMAGE_TAG }}
           format: sarif
